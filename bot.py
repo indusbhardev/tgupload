@@ -12,19 +12,24 @@ from telegram.ext import (
 
 # Configuration from Environment Variables
 TOKEN = os.getenv("BOT_TOKEN")
-WEB_DOMAIN = os.getenv(
-    "WEB_DOMAIN", "http://localhost:5000"
-)  # Your free hosting URL
+# Clean up WEB_DOMAIN to prevent trailing slash issues
+WEB_DOMAIN = os.getenv("WEB_DOMAIN", "").strip().rstrip("/")
+if not WEB_DOMAIN:
+  WEB_DOMAIN = "http://localhost:5000"
 
 app = Flask(__name__)
 PORT = int(os.environ.get("PORT", 5000))
 
 
-# --- Flask Web Server (Serves Direct Download Links) ---
+# --- Flask Web Server ---
+@app.route("/")
+def home():
+  return "Telegram File Download Bot is active and running!", 200
+
+
 @app.route("/download/<file_id>")
 def download_file(file_id):
   try:
-    # Fetch file path from Telegram API securely on the server side
     file_info_res = requests.get(
         f"https://api.telegram.org/bot{TOKEN}/getFile?file_id={file_id}"
     ).json()
@@ -35,7 +40,6 @@ def download_file(file_id):
     telegram_file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
     file_name = file_path.split("/")[-1]
 
-    # Stream the file from Telegram to the user's browser
     req = requests.get(telegram_file_url, stream=True)
     return Response(
         stream_with_context(req.iter_content(chunk_size=1024)),
@@ -47,9 +51,6 @@ def download_file(file_id):
 
 
 # --- Telegram Bot Handlers ---
-
-
-# 1. Handle incoming files (File -> Link)
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
   document = (
       update.message.document
@@ -65,7 +66,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
   )
 
 
-# 2. Handle incoming URLs (Link -> File -> Link)
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
   text = update.message.text
   if text.startswith("http://") or text.startswith("https://"):
@@ -105,12 +105,10 @@ def run_flask():
 
 
 def main():
-  # Start Flask server in a background thread
   flask_thread = threading.Thread(target=run_flask)
   flask_thread.daemon = True
   flask_thread.start()
 
-  # Start Telegram Bot
   application = ApplicationBuilder().token(TOKEN).build()
   application.add_handler(
       MessageHandler(
