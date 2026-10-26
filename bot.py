@@ -15,7 +15,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 # Clean up WEB_DOMAIN to prevent trailing slash issues
 WEB_DOMAIN = os.getenv("WEB_DOMAIN", "").strip().rstrip("/")
 if not WEB_DOMAIN:
-  WEB_DOMAIN = "http://localhost:5000"
+  WEB_DOMAIN = "https://tgupload-r8d0.onrender.com/"
 
 app = Flask(__name__)
 PORT = int(os.environ.get("PORT", 5000))
