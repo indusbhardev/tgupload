@@ -6,8 +6,14 @@ import base64
 import asyncio
 import mimetypes
 import urllib.parse
+
+# CRITICAL FIX FOR PYTHON 3.14+:
+# Create and register the event loop BEFORE importing Pyrogram
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
 from aiohttp import web, ClientSession, ClientTimeout
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import (
     Message,
     InlineKeyboardMarkup,
@@ -17,15 +23,16 @@ from pyrogram.types import (
 from pyrogram.errors import FloodWait, RPCError
 
 # ==================== CONFIGURATION ====================
-API_ID = int(os.environ.get("API_ID", "0"))
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+API_ID_RAW = os.environ.get("API_ID", "0").strip()
+API_ID = int(API_ID_RAW) if API_ID_RAW.isdigit() else 0
+API_HASH = os.environ.get("API_HASH", "").strip()
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 PORT = int(os.environ.get("PORT", "8080"))
 
 DOWNLOAD_DIR = "./downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Track active tasks to allow users to cancel in-progress transfers
+# Track active tasks so users can cancel in-progress transfers
 ACTIVE_TASKS = set()
 
 app = Client(
@@ -33,7 +40,9 @@ app = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
+    in_memory=True,
 )
+
 
 # ==================== HELPER FUNCTIONS ====================
 def human_readable_size(size_bytes: int) -> str:
@@ -59,24 +68,24 @@ def format_time(seconds: float) -> str:
 
 
 def extract_filename(url: str, headers: dict) -> str:
-    # 1. Try Content-Disposition header
     cd = headers.get("Content-Disposition", "")
     if cd:
-        match = re.findall(r'filename\*?=(?:UTF-8\'\')?["\']?([^"\';\r\n]+)', cd, flags=re.IGNORECASE)
+        match = re.findall(
+            r'filename\*?=(?:UTF-8\'\')?["\']?([^"\';\r\n]+)',
+            cd,
+            flags=re.IGNORECASE,
+        )
         if match:
             return urllib.parse.unquote(match[0].strip())
 
-    # 2. Fallback to URL path
     parsed_path = urllib.parse.urlparse(url).path
     filename = os.path.basename(urllib.parse.unquote(parsed_path))
 
-    # 3. Fallback if URL has no filename or extension
     if not filename or "." not in filename:
         content_type = headers.get("Content-Type", "").split(";")[0].strip()
         ext = mimetypes.guess_extension(content_type) or ".bin"
         filename = (filename or f"file_{int(time.time())}") + ext
 
-    # Sanitize illegal filesystem characters
     filename = re.sub(r'[\\/*?:"<>|]', "_", filename)
     return filename[:180]
 
@@ -84,7 +93,11 @@ def extract_filename(url: str, headers: dict) -> str:
 def detect_format_info(filename: str, content_type_header: str) -> tuple[str, str]:
     ext = os.path.splitext(filename)[1].lower().lstrip(".")
     guessed_mime, _ = mimetypes.guess_type(filename)
-    mime_type = (content_type_header.split(";")[0].strip() if content_type_header else "") or guessed_mime or "application/octet-stream"
+    mime_type = (
+        (content_type_header.split(";")[0].strip() if content_type_header else "")
+        or guessed_mime
+        or "application/octet-stream"
+    )
     ext_label = ext.upper() if ext else "UNKNOWN"
     return f"{ext_label} ({mime_type})", ext
 
@@ -115,7 +128,6 @@ async def update_progress_ui(
         raise asyncio.CancelledError("Transfer cancelled by user.")
 
     now = time.time()
-    # Throttle edits to once every 3.5 seconds to prevent Telegram FloodWait
     if (now - last_edit["time"] < 3.5) and (current != total):
         return
 
@@ -165,7 +177,6 @@ async def update_progress_ui(
 @app.on_message(filters.command("start"))
 async def start_handler(client: Client, message: Message):
     try:
-        # Handle deep-link Telegram File Link clicks
         if len(message.command) > 1 and message.command[1].startswith("f_"):
             payload = message.command[1][2:]
             try:
@@ -214,7 +225,7 @@ async def noop_callback(client: Client, query: CallbackQuery):
     await query.answer("Transfer in progress...", show_alert=False)
 
 
-@app.on_message(filters.text & filters. regex(r"https?://[^\s]+"))
+@app.on_message(filters.text & filters.regex(r"https?://[^\s]+"))
 async def url_upload_handler(client: Client, message: Message):
     url_match = re.search(r"https?://[^\s]+", message.text)
     if not url_match:
@@ -253,16 +264,13 @@ async def url_upload_handler(client: Client, message: Message):
         async with ClientSession(timeout=timeout, headers=headers) as session:
             async with session.get(url, allow_redirects=True) as response:
                 if response.status >= 400:
-                    raise RuntimeError(
-                        f"HTTP {response.status} - {response.reason}"
-                    )
+                    raise RuntimeError(f"HTTP {response.status} - {response.reason}")
 
                 filename = extract_filename(str(response.url), response.headers)
                 content_type = response.headers.get("Content-Type", "")
                 format_label, ext = detect_format_info(filename, content_type)
                 total_size = int(response.headers.get("Content-Length", 0))
 
-                # Telegram bot MTProto limit check (2 GB)
                 if total_size > 2000 * 1024 * 1024:
                     raise ValueError(
                         f"File size ({human_readable_size(total_size)}) exceeds Telegram's 2 GB limit."
@@ -336,7 +344,6 @@ async def url_upload_handler(client: Client, message: Message):
             f"🔗 **Direct Link:** [Click Here]({url})"
         )
 
-        # Smart format routing with automatic fallback to Document for universal format support
         sent_msg = None
         try:
             if ext in ("jpg", "jpeg", "png", "webp") and actual_size <= 10 * 1024 * 1024:
@@ -377,7 +384,6 @@ async def url_upload_handler(client: Client, message: Message):
                     progress=upload_progress,
                 )
         except RPCError:
-            # If media-specific upload fails (e.g., unindexed video/photo header), fallback to raw document
             sent_msg = await client.send_document(
                 chat_id=message.chat.id,
                 document=local_filepath,
@@ -448,6 +454,11 @@ async def health_check(request):
 
 
 async def main():
+    if not API_ID or not API_HASH or not BOT_TOKEN:
+        raise ValueError(
+            "Missing API_ID, API_HASH, or BOT_TOKEN in Render Environment Variables."
+        )
+
     # Start lightweight web server required by Render Web Services
     server = web.Application()
     server.router.add_get("/", health_check)
@@ -457,12 +468,13 @@ async def main():
     await site.start()
     print(f"Health-check server listening on port {PORT}")
 
-    # Start Pyrogram Bot
+    # Start Pyrogram Bot on the same event loop
     await app.start()
     me = await app.get_me()
     print(f"Bot @{me.username} started successfully!")
-    await asyncio.Event().wait()
+    await idle()
+    await app.stop()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop.run_until_complete(main())
