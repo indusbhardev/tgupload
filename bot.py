@@ -169,6 +169,23 @@ def decode_file_payload(payload: str) -> tuple[int, int]:
     return int(chat_id_str), int(msg_id_str)
 
 
+def build_server_links(bot_username: str, chat_id: int, message_id: int, filename: str) -> tuple[str, str]:
+    """
+    Returns (direct_dl_link, tg_file_link) pointing to this Render server and Telegram bot.
+    """
+    payload = encode_file_payload(chat_id, message_id)
+    tg_file_link = f"https://t.me/{bot_username}?start=f_{payload}"
+
+    base_url = get_base_url()
+    safe_url_filename = urllib.parse.quote(filename)
+    if base_url:
+        direct_dl_link = f"{base_url}/dl/{payload}/{safe_url_filename}"
+    else:
+        direct_dl_link = tg_file_link
+
+    return direct_dl_link, tg_file_link
+
+
 async def update_progress_ui(
     status_msg: Message,
     stage: str,
@@ -253,8 +270,8 @@ async def start_handler(client: Client, message: Message):
         await message.reply_text(
             "👋 **Welcome to the File & Direct Link Uploader Bot!**\n\n"
             "**How to use me:**\n"
-            "1️⃣ **Send a Direct Download Link** (`http://` or `https://`) — I will download and upload it to Telegram with live progress.\n"
-            "2️⃣ **Upload any Local File** (Document, ZIP, RAR, Video, Audio, Photo, APK, etc.) — I will generate its **Direct Download Link**, **Telegram File Link**, **Format Type**, and **File Size**!"
+            "1️⃣ **Send a Direct Download Link** (`http://` or `https://`) — I will download and upload it to Telegram with live progress and generate your Server Direct Download Link.\n"
+            "2️⃣ **Upload any Local File** (Document, ZIP, RAR, Video, Audio, Photo, APK, etc.) — I will generate its **Server Direct Download Link**, **Telegram File Link**, **Format Type**, and **File Size**!"
         )
     except Exception as e:
         await message.reply_text(
@@ -315,22 +332,18 @@ async def local_file_handler(client: Client, message: Message):
         filename, format_label, file_size, _ = extract_telegram_media_details(message)
         readable_size = human_readable_size(file_size)
 
-        # Copy the uploaded file so the bot returns the file with all metadata and buttons attached
         sent_msg = await message.copy(
             chat_id=message.chat.id,
             reply_to_message_id=message.id,
         )
 
         bot_me = await client.get_me()
-        payload = encode_file_payload(sent_msg.chat.id, sent_msg.id)
-        tg_file_link = f"https://t.me/{bot_me.username}?start=f_{payload}"
-
-        base_url = get_base_url()
-        safe_url_filename = urllib.parse.quote(filename)
-        if base_url:
-            direct_dl_link = f"{base_url}/dl/{payload}/{safe_url_filename}"
-        else:
-            direct_dl_link = tg_file_link
+        direct_dl_link, tg_file_link = build_server_links(
+            bot_username=bot_me.username,
+            chat_id=sent_msg.chat.id,
+            message_id=sent_msg.id,
+            filename=filename,
+        )
 
         final_caption = (
             f"📄 **Title:** `{filename}`\n"
@@ -483,7 +496,7 @@ async def url_upload_handler(client: Client, message: Message):
             f"📄 **Title:** `{filename}`\n"
             f"🗂 **Format Type:** `{format_label}`\n"
             f"📦 **File Size:** `{readable_size}`\n"
-            f"🔗 **Direct Link:** [Click Here]({url})"
+            f"⏳ **Generating Server Direct Download Link...**"
         )
 
         sent_msg = None
@@ -556,24 +569,28 @@ async def url_upload_handler(client: Client, message: Message):
         if local_filepath and os.path.exists(local_filepath):
             os.remove(local_filepath)
 
-    # ---------------- STAGE 3: ATTACH TELEGRAM FILE LINK & FINAL DETAILS ----------------
+    # ---------------- STAGE 3: ATTACH SERVER DIRECT LINK & TELEGRAM LINK ----------------
     try:
         bot_me = await client.get_me()
-        payload = encode_file_payload(sent_msg.chat.id, sent_msg.id)
-        tg_file_link = f"https://t.me/{bot_me.username}?start=f_{payload}"
+        direct_dl_link, tg_file_link = build_server_links(
+            bot_username=bot_me.username,
+            chat_id=sent_msg.chat.id,
+            message_id=sent_msg.id,
+            filename=filename,
+        )
 
         final_caption = (
             f"📄 **Title:** `{filename}`\n"
             f"🗂 **Format Type:** `{format_label}`\n"
             f"📦 **File Size:** `{readable_size}`\n"
-            f"🌐 **Direct Download Link:** [Download Original]({url})\n"
+            f"🌐 **Direct Download Link:** [Download File]({direct_dl_link})\n"
             f"✈️ **Telegram File Link:** [Get File in Telegram]({tg_file_link})"
         )
 
         buttons = InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("🌐 Direct Download Link", url=url),
+                    InlineKeyboardButton("🌐 Direct Download Link", url=direct_dl_link),
                     InlineKeyboardButton("✈️ Telegram File Link", url=tg_file_link),
                 ]
             ]
