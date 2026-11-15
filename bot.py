@@ -185,4 +185,167 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 2. Handle direct file uploads locally from device
 async def handle_local_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
+        msg = update.message
+        doc = msg.document or msg.video or msg.audio or (msg.photo[-1] if msg.photo else None)
+        if not doc:
+            await msg.reply_text("❌ Error: Unsupported or empty file format.")
+            return
+
+        file_id = doc.file_id
         
+        # Extract original file name
+        if hasattr(doc, "file_name") and doc.file_name:
+            file_name = doc.file_name
+        elif msg.video:
+            file_name = f"video_{file_id[:8]}.mp4"
+        elif msg.audio:
+            file_name = f"audio_{file_id[:8]}.mp3"
+        elif msg.photo:
+            file_name = f"photo_{file_id[:8]}.jpg"
+        else:
+            file_name = "document_file"
+
+        # Format file size
+        size_bytes = getattr(doc, "file_size", 0)
+        if size_bytes:
+            if size_bytes >= 1024 * 1024:
+                file_size = f"{size_bytes / (1024 * 1024):.2f} MB"
+            else:
+                file_size = f"{size_bytes / 1024:.2f} KB"
+        else:
+            file_size = "Unknown Size"
+
+        file_type, format_desc = get_file_metadata(file_name)
+        short_id = save_file_to_db(file_id, file_name, file_type, file_size)
+
+        bot_username = context.bot.username or BOT_USERNAME
+        direct_link = f"{WEB_DOMAIN}/download/{short_id}"
+        tg_link = f"https://t.me/{bot_username}?start={short_id}"
+
+        caption = (
+            f"✅ File processed successfully!\n\n"
+            f"📁 File Name: {file_name}\n"
+            f"📂 Type: {file_type}\n"
+            f"📌 Format: {format_desc}\n"
+            f"📦 Size: {file_size}\n\n"
+            f"🔗 Direct Download Link (Browser):\n{direct_link}\n\n"
+            f"🤖 Telegram Bot Share Link:\n{tg_link}"
+        )
+
+        await msg.reply_text(caption)
+    except Exception as e:
+        await msg.reply_text(f"❌ Error processing file upload: {str(e)}")
+
+
+# 3. Handle direct URLs (Link -> File -> Link)
+async def handle_url_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if not text or not (text.startswith("http://") or text.startswith("https://")):
+        return
+
+    status_msg = await update.message.reply_text("📥 Downloading file from your link...")
+    local_path = None
+    try:
+        response = requests.get(text, stream=True, timeout=60)
+        if response.status_code != 200:
+            await status_msg.edit_text(f"❌ Download Error: HTTP Status Code {response.status_code}")
+            return
+
+        filename = text.split("/")[-1].split("?")[0] or "downloaded_file"
+        if "." not in filename:
+            filename += ".bin"
+        
+        local_path = os.path.join("/tmp", filename)
+        with open(local_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        file_size_bytes = os.path.getsize(local_path)
+        file_size_mb = file_size_bytes / (1024 * 1024)
+
+        # Telegram bot API restriction check (50MB cap)
+        if file_size_mb > 50:
+            await status_msg.edit_text(
+                f"❌ Upload Error: File size is {file_size_mb:.1f} MB.\n"
+                "Telegram Bot API has a strict 50MB upload limit for bots. "
+                "Files larger than 50MB cannot be uploaded directly via bot token."
+            )
+            if os.path.exists(local_path):
+                os.remove(local_path)
+            return
+
+        await status_msg.edit_text("📤 Uploading file to Telegram storage...")
+
+        file_type_cat, _ = get_file_metadata(filename)
+        with open(local_path, "rb") as f:
+            if "Video" in file_type_cat:
+                sent_msg = await context.bot.send_video(chat_id=update.effective_chat.id, video=f)
+                doc_obj = sent_msg.video
+            elif "Music" in file_type_cat:
+                sent_msg = await context.bot.send_audio(chat_id=update.effective_chat.id, audio=f)
+                doc_obj = sent_msg.audio
+            elif "Image" in file_type_cat:
+                sent_msg = await context.bot.send_photo(chat_id=update.effective_chat.id, photo=f)
+                doc_obj = sent_msg.photo[-1]
+            else:
+                sent_msg = await context.bot.send_document(chat_id=update.effective_chat.id, document=f)
+                doc_obj = sent_msg.document
+
+        file_id = doc_obj.file_id
+        
+        if file_size_mb >= 1:
+            file_size_str = f"{file_size_mb:.2f} MB"
+        else:
+            file_size_str = f"{file_size_bytes / 1024:.2f} KB"
+
+        file_type, format_desc = get_file_metadata(filename)
+        short_id = save_file_to_db(file_id, filename, file_type, file_size_str)
+
+        bot_username = context.bot.username or BOT_USERNAME
+        direct_link = f"{WEB_DOMAIN}/download/{short_id}"
+        tg_link = f"https://t.me/{bot_username}?start={short_id}"
+
+        caption = (
+            f"✅ File processed successfully!\n\n"
+            f"📁 File Name: {filename}\n"
+            f"📂 Type: {file_type}\n"
+            f"📌 Format: {format_desc}\n"
+            f"📦 Size: {file_size_str}\n\n"
+            f"🔗 Direct Download Link (Browser):\n{direct_link}\n\n"
+            f"🤖 Telegram Bot Share Link:\n{tg_link}"
+        )
+
+        await status_msg.edit_text(caption)
+        if os.path.exists(local_path):
+            os.remove(local_path)
+    except Exception as e:
+        if local_path and os.path.exists(local_path):
+            os.remove(local_path)
+        await status_msg.edit_text(f"❌ Error processing URL/server: {str(e)}")
+
+
+def run_flask():
+    app.run(host="0.0.0.0", port=PORT)
+
+def main():
+    # Start Flask web server in a background thread
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+
+    # Start Telegram Bot application
+    application = ApplicationBuilder().token(TOKEN).build()
+    
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(
+        MessageHandler(
+            filters.Document.ALL | filters.VIDEO | filters.AUDIO | filters.PHOTO,
+            handle_local_file
+        )
+    )
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_url_link))
+
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
