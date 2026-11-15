@@ -17,8 +17,8 @@ from telegram.ext import (
 # Configuration from Environment Variables
 TOKEN = os.getenv("BOT_TOKEN")
 # Ensure WEB_DOMAIN doesn't have a trailing slash
-WEB_DOMAIN = os.getenv("WEB_DOMAIN", "http://localhost:5000").rstrip("/")
-BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot_username")
+WEB_DOMAIN = os.getenv("WEB_DOMAIN", "https://tgupload-r8d0.onrender.com/").rstrip("/")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "tg_file_upload_bot")
 
 app = Flask(__name__)
 PORT = int(os.environ.get("PORT", 5000))
