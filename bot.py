@@ -16,8 +16,9 @@ from telegram.ext import (
 
 # Configuration from Environment Variables
 TOKEN = os.getenv("BOT_TOKEN")
-WEB_DOMAIN = os.getenv("WEB_DOMAIN", "https://tgupload-r8d0.onrender.com/")
-BOT_USERNAME = os.getenv("BOT_USERNAME", "tg_file_upload_bot")
+# Ensure WEB_DOMAIN doesn't have a trailing slash
+WEB_DOMAIN = os.getenv("WEB_DOMAIN", "http://localhost:5000").rstrip("/")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot_username")
 
 app = Flask(__name__)
 PORT = int(os.environ.get("PORT", 5000))
@@ -162,7 +163,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🤖 Telegram Bot Share Link:\n{tg_link}"
                 )
                 
-                await update.message.reply_document(document=file_id, caption=caption)
+                # Send correctly based on file type
+                if file_type == "Video File":
+                    await update.message.reply_video(video=file_id, caption=caption)
+                elif file_type == "Music / Audio File":
+                    await update.message.reply_audio(audio=file_id, caption=caption)
+                elif file_type == "Image File":
+                    await update.message.reply_photo(photo=file_id, caption=caption)
+                else:
+                    await update.message.reply_document(document=file_id, caption=caption)
                 return
             else:
                 await update.message.reply_text("❌ Error: The requested file link is invalid or expired.")
