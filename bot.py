@@ -347,5 +347,29 @@ def main():
 
     application.run_polling()
 
-In if __name__ == "__main__":
+def run_flask():
+    app.run(host="0.0.0.0", port=PORT)
+
+def main():
+    # Start Flask web server in a background thread
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+
+    # Start Telegram Bot application
+    application = ApplicationBuilder().token(TOKEN).build()
+    
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(
+        MessageHandler(
+            filters.Document.ALL | filters.VIDEO | filters.AUDIO | filters.PHOTO,
+            handle_local_file
+        )
+    )
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_url_link))
+
+    application.run_polling()
+
+if __name__ == "__main__":
     main()
+
