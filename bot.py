@@ -29,10 +29,17 @@ API_HASH = os.environ.get("API_HASH", "").strip()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 PORT = int(os.environ.get("PORT", "8080"))
 
+# Render automatically populates RENDER_EXTERNAL_URL on Web Services
+RENDER_EXTERNAL_URL = (
+    os.environ.get("BASE_URL")
+    or os.environ.get("RENDER_EXTERNAL_URL")
+    or ""
+).rstrip("/")
+DETECTED_BASE_URL = ""
+
 DOWNLOAD_DIR = "./downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Track active tasks so users can cancel in-progress transfers
 ACTIVE_TASKS = set()
 
 app = Client(
@@ -45,6 +52,10 @@ app = Client(
 
 
 # ==================== HELPER FUNCTIONS ====================
+def get_base_url() -> str:
+    return RENDER_EXTERNAL_URL or DETECTED_BASE_URL
+
+
 def human_readable_size(size_bytes: int) -> str:
     if size_bytes is None or size_bytes <= 0:
         return "0 B"
@@ -100,6 +111,50 @@ def detect_format_info(filename: str, content_type_header: str) -> tuple[str, st
     )
     ext_label = ext.upper() if ext else "UNKNOWN"
     return f"{ext_label} ({mime_type})", ext
+
+
+def extract_telegram_media_details(message: Message) -> tuple[str, str, int, str]:
+    """
+    Extracts (filename, format_label, file_size, mime_type) from any Telegram media message.
+    """
+    media = (
+        message.document
+        or message.video
+        or message.audio
+        or message.animation
+        or message.voice
+        or message.video_note
+        or message.sticker
+        or message.photo
+    )
+    if not media:
+        raise ValueError("Unsupported or empty media object in message.")
+
+    file_size = getattr(media, "file_size", 0) or 0
+    mime_type = getattr(media, "mime_type", "") or ""
+    filename = getattr(media, "file_name", None)
+
+    if message.photo and not filename:
+        mime_type = "image/jpeg"
+        filename = f"photo_{message.id}.jpg"
+    elif message.voice and not filename:
+        mime_type = mime_type or "audio/ogg"
+        filename = f"voice_{message.id}.ogg"
+    elif message.video_note and not filename:
+        mime_type = mime_type or "video/mp4"
+        filename = f"video_note_{message.id}.mp4"
+    elif message.sticker and not filename:
+        ext = mimetypes.guess_extension(mime_type) or ".webp"
+        filename = f"sticker_{message.id}{ext}"
+    elif not filename:
+        ext = mimetypes.guess_extension(mime_type) or ".bin"
+        filename = f"file_{message.id}{ext}"
+
+    filename = re.sub(r'[\\/*?:"<>|]', "_", filename)
+    format_label, _ = detect_format_info(filename, mime_type)
+    resolved_mime = mime_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+    return filename, format_label, file_size, resolved_mime
 
 
 def encode_file_payload(chat_id: int, message_id: int) -> str:
@@ -196,11 +251,10 @@ async def start_handler(client: Client, message: Message):
                 return
 
         await message.reply_text(
-            "👋 **Welcome to the Direct Link Uploader Bot!**\n\n"
-            "Send me any **direct downloadable URL** (`http://` or `https://`) and I will:\n"
-            "1. Download and upload it to Telegram with live progress\n"
-            "2. Support all formats (Documents, ZIP, RAR, Video, Audio, Images, APK, etc.)\n"
-            "3. Return the file with its **Title**, **Format Type**, **Size**, **Direct Link**, and **Telegram File Link**"
+            "👋 **Welcome to the File & Direct Link Uploader Bot!**\n\n"
+            "**How to use me:**\n"
+            "1️⃣ **Send a Direct Download Link** (`http://` or `https://`) — I will download and upload it to Telegram with live progress.\n"
+            "2️⃣ **Upload any Local File** (Document, ZIP, RAR, Video, Audio, Photo, APK, etc.) — I will generate its **Direct Download Link**, **Telegram File Link**, **Format Type**, and **File Size**!"
         )
     except Exception as e:
         await message.reply_text(
@@ -222,9 +276,97 @@ async def cancel_callback(client: Client, query: CallbackQuery):
 
 @app.on_callback_query(filters.regex(r"^noop$"))
 async def noop_callback(client: Client, query: CallbackQuery):
-    await query.answer("Transfer in progress...", show_alert=False)
+    await query.answer("Processing...", show_alert=False)
 
 
+# ==================== HANDLER 1: LOCAL FILES UPLOADED TO BOT ====================
+MEDIA_FILTER = (
+    filters.document
+    | filters.video
+    | filters.audio
+    | filters.photo
+    | filters.animation
+    | filters.voice
+    | filters.video_note
+    | filters.sticker
+)
+
+
+@app.on_message(MEDIA_FILTER)
+async def local_file_handler(client: Client, message: Message):
+    status_msg = None
+    try:
+        status_msg = await message.reply_text(
+            "⚙️ **Processing your local file and generating links...**",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔄 Processing Local File...", callback_data="noop")]]
+            ),
+            quote=True,
+        )
+    except Exception as e:
+        await message.reply_text(
+            f"❌ **Message Error (Failed to send status message)**\n"
+            f"🔸 **Error Type:** `{type(e).__name__}`\n"
+            f"🔸 **Error Details:** `{str(e)}`"
+        )
+        return
+
+    try:
+        filename, format_label, file_size, _ = extract_telegram_media_details(message)
+        readable_size = human_readable_size(file_size)
+
+        # Copy the uploaded file so the bot returns the file with all metadata and buttons attached
+        sent_msg = await message.copy(
+            chat_id=message.chat.id,
+            reply_to_message_id=message.id,
+        )
+
+        bot_me = await client.get_me()
+        payload = encode_file_payload(sent_msg.chat.id, sent_msg.id)
+        tg_file_link = f"https://t.me/{bot_me.username}?start=f_{payload}"
+
+        base_url = get_base_url()
+        safe_url_filename = urllib.parse.quote(filename)
+        if base_url:
+            direct_dl_link = f"{base_url}/dl/{payload}/{safe_url_filename}"
+        else:
+            direct_dl_link = tg_file_link
+
+        final_caption = (
+            f"📄 **Title:** `{filename}`\n"
+            f"🗂 **Format Type:** `{format_label}`\n"
+            f"📦 **File Size:** `{readable_size}`\n"
+            f"🌐 **Direct Download Link:** [Download File]({direct_dl_link})\n"
+            f"✈️ **Telegram File Link:** [Get File in Telegram]({tg_file_link})"
+        )
+
+        buttons = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🌐 Direct Download Link", url=direct_dl_link),
+                    InlineKeyboardButton("✈️ Telegram File Link", url=tg_file_link),
+                ]
+            ]
+        )
+
+        await sent_msg.edit_caption(final_caption, reply_markup=buttons)
+        await status_msg.delete()
+
+    except Exception as e:
+        err_text = (
+            f"❌ **Local File Processing Error**\n\n"
+            f"🔸 **Error Type:** `{type(e).__name__}`\n"
+            f"🔸 **Error Details:** `{str(e)}`"
+        )
+        try:
+            await status_msg.edit_text(err_text)
+        except Exception as msg_err:
+            await message.reply_text(
+                f"{err_text}\n🔸 **Secondary Message Error:** `{type(msg_err).__name__}: {msg_err}`"
+            )
+
+
+# ==================== HANDLER 2: DIRECT DOWNLOADABLE URLS ====================
 @app.on_message(filters.text & filters.regex(r"https?://[^\s]+"))
 async def url_upload_handler(client: Client, message: Message):
     url_match = re.search(r"https?://[^\s]+", message.text)
@@ -448,9 +590,51 @@ async def url_upload_handler(client: Client, message: Message):
         )
 
 
-# ==================== RENDER HEALTH-CHECK WEB SERVER ====================
-async def health_check(request):
-    return web.Response(text="Telegram URL Uploader Bot is running!", status=200)
+# ==================== RENDER WEB SERVER & DIRECT STREAMING ====================
+async def health_check(request: web.Request):
+    global DETECTED_BASE_URL
+    host = request.headers.get("Host", "")
+    if host and not host.startswith(("127.0.0.1", "localhost", "0.0.0.0")):
+        proto = request.headers.get("X-Forwarded-Proto", "https")
+        DETECTED_BASE_URL = f"{proto}://{host}"
+    return web.Response(text="Telegram File & URL Uploader Bot is running!", status=200)
+
+
+async def stream_telegram_file(request: web.Request):
+    """
+    Streams any Telegram file uploaded to the bot directly to a web browser.
+    URL pattern: /dl/{payload}/{filename}
+    """
+    payload = request.match_info.get("payload", "")
+    try:
+        chat_id, msg_id = decode_file_payload(payload)
+        msg = await app.get_messages(chat_id, msg_id)
+        if not msg or not msg.media:
+            return web.Response(text="404: File not found on Telegram.", status=404)
+
+        filename, _, file_size, mime_type = extract_telegram_media_details(msg)
+
+        headers = {
+            "Content-Type": mime_type,
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        }
+        if file_size > 0:
+            headers["Content-Length"] = str(file_size)
+
+        response = web.StreamResponse(status=200, reason="OK", headers=headers)
+        await response.prepare(request)
+
+        async for chunk in app.stream_media(msg):
+            await response.write(chunk)
+
+        await response.write_eof()
+        return response
+
+    except Exception as e:
+        return web.Response(
+            text=f"Download Error ({type(e).__name__}): {str(e)}",
+            status=500,
+        )
 
 
 async def main():
@@ -459,16 +643,16 @@ async def main():
             "Missing API_ID, API_HASH, or BOT_TOKEN in Render Environment Variables."
         )
 
-    # Start lightweight web server required by Render Web Services
     server = web.Application()
     server.router.add_get("/", health_check)
+    server.router.add_get("/dl/{payload}/{filename}", stream_telegram_file)
+
     runner = web.AppRunner(server)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print(f"Health-check server listening on port {PORT}")
+    print(f"Web & Direct-Stream server listening on port {PORT}")
 
-    # Start Pyrogram Bot on the same event loop
     await app.start()
     me = await app.get_me()
     print(f"Bot @{me.username} started successfully!")
